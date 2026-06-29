@@ -1,0 +1,203 @@
+# PixelPulse Docker Compose 配置
+# 6个服务: postgres / qdrant / redis / backend / worker / frontend
+# 启动: docker compose up -d --build
+
+networks:
+  pixelpulse-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  rag_postgres_data:
+    driver: local
+  rag_qdrant_data:
+    driver: local
+  rag_redis_data:
+    driver: local
+  rag_uploads:
+    driver: local
+
+services:
+
+  # PostgreSQL - 业务数据
+  postgres:
+    image: postgres:16-alpine
+    container_name: rag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pixelpulse
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    volumes:
+      - rag_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - pixelpulse-net
+    shm_size: 256MB
+    mem_limit: 512m
+    memswap_limit: 1g
+    cpus: '1.0'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pixelpulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Qdrant - 向量库，存BGE-M3的1024维向量
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: rag-qdrant
+    restart: unless-stopped
+    volumes:
+      - rag_qdrant_data:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    networks:
+      - pixelpulse-net
+    mem_limit: 1g
+    memswap_limit: 2g
+    cpus: '1.5'
+    # qdrant镜像没curl，做不了健康检查，backend启动时会连它初始化，连不上就报错
+
+  # Redis - 缓存 + 任务队列
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    restart: unless-stopped
+    volumes:
+      - rag_redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - pixelpulse-net
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    mem_limit: 384m
+    memswap_limit: 512m
+    cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # Backend - FastAPI 主服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rag-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # 容器内用服务名访问
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/pixelpulse
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379/0
+      # Ollama跑在宿主机，通过host.docker.internal访问
+      LLM_API_URL: http://host.docker.internal:11434/api/generate
+      EMBEDDING_API_URL: http://host.docker.internal:11434/api/embeddings
+      VISION_LLM_API_URL: http://host.docker.internal:11434/api/generate
+      RERANKER_API_URL: http://host.docker.internal:11434/api/generate
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - rag_uploads:/app/uploads
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    networks:
+      - pixelpulse-net
+    mem_limit: 1g
+    memswap_limit: 2g
+    cpus: '2.0'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Worker - 后台文档解析任务，和backend共用镜像
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rag-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/pixelpulse
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379/0
+      LLM_API_URL: http://host.docker.internal:11434/api/generate
+      EMBEDDING_API_URL: http://host.docker.internal:11434/api/embeddings
+      VISION_LLM_API_URL: http://host.docker.internal:11434/api/generate
+      RERANKER_API_URL: http://host.docker.internal:11434/api/generate
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - rag_uploads:/app/uploads
+    command: python -m app.worker.tasks
+    networks:
+      - pixelpulse-net
+    mem_limit: 1.5g
+    memswap_limit: 3g
+    cpus: '2.0'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Frontend - Nginx托管Vue SPA + 反向代理API
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rag-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - pixelpulse-net
+    mem_limit: 256m
+    memswap_limit: 512m
+    cpus: '1.0'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# 常用命令:
+# 启动: docker compose up -d --build
+# 停服: docker compose down
+# 清数据: docker compose down -v (小心！所有数据都没了)
+# 看日志: docker compose logs -f backend
+# 数据库迁移: docker compose exec -T backend alembic upgrade head
+# 初始化数据: docker compose exec -T backend python scripts/init_db.py
