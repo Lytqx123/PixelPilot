@@ -19,51 +19,6 @@
 
 ***
 
-## 技术栈
-
-### 后端技术
-
-- **Web 框架**: FastAPI 0.104.1
-- **ORM**: SQLAlchemy 2.0 (asyncpg 异步驱动)
-- **数据库迁移**: Alembic 1.13.0
-- **数据校验**: Pydantic 2.7.0
-- **认证**: python-jose (JWT) + passlib + bcrypt
-- **关系数据库**: PostgreSQL 16
-- **向量数据库**: Qdrant v1.7.4
-- **缓存/队列**: Redis 7
-- **文档解析**: unstructured, PaddleOCR, ezdxf
-- **HTTP 客户端**: httpx (异步连接池)
-
-### 前端技术
-
-- **框架**: Vue 3.4
-- **构建工具**: Vite 5.0
-- **UI 组件库**: Element Plus 2.4
-- **状态管理**: Pinia 2.1
-- **路由**: Vue Router 4.2
-- **HTTP 客户端**: Axios 1.6
-- **Markdown 渲染**: markdown-it 14.0
-
-### AI 模型（通过 Ollama 部署）
-
-| 用途      | 模型                | 说明            |
-| ------- | ----------------- | ------------- |
-| 对话/总结   | qwen2.5:14b       | 主力大语言模型       |
-| 文本向量化   | bge-m3            | 多语言向量模型，1024维 |
-| 图纸/图片理解 | minicpm-v:8b      | 多模态视觉模型       |
-| 检索重排    | Qwen3-Reranker-4B | 检索结果精排        |
-
-> ✅ 注：Reranker 和 VLM 为可选功能，可通过配置文件禁用。
-
-### 部署
-
-- **容器化**: Docker + Docker Compose
-- **Web 服务器**: Nginx (前端静态托管 + API 反向代理)
-- **Python 版本**: 3.11
-- **Node 版本**: 20
-
-***
-
 ## 系统架构
 
 ```
@@ -125,7 +80,7 @@
 
 ***
 
-### 方式一：Docker Compose 部署（推荐）
+### Docker Compose 部署（推荐）
 
 #### 1. 克隆项目并进入目录
 
@@ -266,123 +221,6 @@ curl http://localhost:11434/api/tags
 | Qwen3-Reranker-4B | 4B   | 4GB+ 显存或 8GB+ 内存      |
 
 > ✅ 注：没有 GPU 的环境也可运行，模型会自动使用 CPU 推理，但响应速度会较慢。
-
-***
-
-## 常见问题
-
-### Q1: 启动后后端日志提示 SECRET\_KEY 错误？
-
-A: 生产环境必须修改 `.env` 中的 `SECRET_KEY` 为随机字符串。开发环境可在 `.env` 中添加 `ALLOW_DEFAULT_SECRET=1` 跳过校验。
-
-### Q2: Docker 容器内无法连接宿主机 Ollama？
-
-A: docker-compose.yml 已配置 `extra_hosts` 将 `host.docker.internal` 指向宿主机网关。确保 Ollama 监听 `0.0.0.0:11434` 而非仅 `127.0.0.1`。设置环境变量：
-
-```bash
-# Linux
-OLLAMA_HOST=0.0.0.0 ollama serve
-```
-
-### Q3: 文档上传后长时间处于"解析中"状态？
-
-A: 检查 Worker 容器日志：
-
-```bash
-docker compose logs -f worker
-```
-
-常见原因：
-
-- PaddleOCR 首次运行需要下载模型，请耐心等待
-- Ollama 服务未启动或模型未拉取
-- 内存不足导致 Worker 进程被 OOM kill
-
-### Q4: 问答响应很慢？
-
-A:
-
-1. 检查是否启用了 Reranker 和 VLM，可按需禁用
-2. 减小 `CHUNK_SIZE`、`RERANKER_PREFETCH`、`RERANKER_TOP_K` 参数
-3. 确保 Ollama 使用 GPU 加速
-4. 换用更小参数的模型（如 qwen2.5:7b）
-
-### Q5: 如何重置数据库？
-
-A:
-
-```bash
-# 停止服务并删除数据卷（注意：会清除所有数据！）
-docker compose down -v
-# 重新启动并迁移
-docker compose up -d --build
-docker compose exec -T backend alembic upgrade head
-docker compose exec -T backend python scripts/init_db.py
-```
-
-### Q6: 支持的最大文件大小是多少？
-
-A: Nginx 配置默认最大上传为 200MB。如需修改，请调整 `frontend/nginx.conf` 中的 `client_max_body_size` 后重新构建前端镜像。
-
-***
-
-## 运维命令
-
-### 服务管理
-
-```bash
-# 启动所有服务（后台运行）
-docker compose up -d --build
-
-# 停止所有服务
-docker compose down
-
-# 重启某个服务
-docker compose restart backend
-
-# 查看服务日志
-docker compose logs -f backend
-docker compose logs -f worker
-```
-
-### 数据库操作
-
-```bash
-# 执行迁移
-docker compose exec -T backend alembic upgrade head
-
-# 创建新迁移
-docker compose exec backend alembic revision --autogenerate -m "migration message"
-
-# 初始化数据
-docker compose exec -T backend python scripts/init_db.py
-
-# 进入数据库容器
-docker compose exec postgres psql -U postgres -d pixelpulse
-```
-
-### 进入容器
-
-```bash
-# 进入后端容器
-docker compose exec backend /bin/sh
-
-# 进入 Worker 容器
-docker compose exec worker /bin/sh
-```
-
-### 备份与恢复
-
-```bash
-# 备份 PostgreSQL
-docker compose exec -T postgres pg_dump -U postgres pixelpulse > backup.sql
-
-# 恢复 PostgreSQL
-cat backup.sql | docker compose exec -T postgres psql -U postgres -d pixelpulse
-
-# 备份上传文件
-docker run --rm -v pixelpulse_rag_uploads:/data -v ${PWD}:/backup alpine tar czf /backup/uploads.tar.gz -C /data .
-```
 
 ***
 
